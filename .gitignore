@@ -1,0 +1,13 @@
+# ESP-IDF build output
+build/
+sdkconfig.old
+managed_components/
+
+# Secrets - never commit
+secrets.h
+*.env
+credentials*
+
+# Editor / OS
+.vscode/
+.DS_Store
