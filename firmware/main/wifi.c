@@ -22,22 +22,33 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT);
         if (s_retries < MAX_RETRIES) {
             s_retries++;
             ESP_LOGW(TAG, "Disconnected, retry %d/%d", s_retries, MAX_RETRIES);
             esp_wifi_connect();
         } else {
+            // Stop retrying on our own; the main loop decides when to try again.
             xEventGroupSetBits(s_events, WIFI_FAIL_BIT);
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retries = 0;
+        xEventGroupClearBits(s_events, WIFI_FAIL_BIT);
         xEventGroupSetBits(s_events, WIFI_CONNECTED_BIT);
     }
 }
 
-esp_err_t wifi_connect(void)
+static esp_err_t wait_for_result(TickType_t timeout)
+{
+    EventBits_t bits = xEventGroupWaitBits(s_events,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE, pdFALSE, timeout);
+    return (bits & WIFI_CONNECTED_BIT) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t wifi_init_and_connect(void)
 {
     s_events = xEventGroupCreate();
 
@@ -62,9 +73,22 @@ esp_err_t wifi_connect(void)
 
     // Log the network name only, never the password.
     ESP_LOGI(TAG, "Connecting to %s ...", WIFI_SSID);
+    return wait_for_result(portMAX_DELAY);
+}
 
-    EventBits_t bits = xEventGroupWaitBits(s_events,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE, pdFALSE, portMAX_DELAY);
-    return (bits & WIFI_CONNECTED_BIT) ? ESP_OK : ESP_FAIL;
+bool wifi_is_connected(void)
+{
+    return (xEventGroupGetBits(s_events) & WIFI_CONNECTED_BIT) != 0;
+}
+
+esp_err_t wifi_reconnect(int timeout_ms)
+{
+    if (wifi_is_connected()) {
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "Reconnecting to %s ...", WIFI_SSID);
+    s_retries = 0;
+    xEventGroupClearBits(s_events, WIFI_FAIL_BIT);
+    esp_wifi_connect();
+    return wait_for_result(pdMS_TO_TICKS(timeout_ms));
 }

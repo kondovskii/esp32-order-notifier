@@ -9,7 +9,7 @@
 #include "cJSON.h"
 
 #define API_VERSION   "2026-07"
-#define RESP_BUF_SIZE 8192   // probe showed ~1.2 KB for 5 orders, so lots of headroom
+#define RESP_BUF_SIZE 16384   // room for ~50 orders in one response
 
 static const char *TAG = "shopify";
 static char s_resp[RESP_BUF_SIZE];
@@ -86,7 +86,35 @@ static esp_err_t https_post(const char *url, const char *content_type, const cha
 static const char *json_str(cJSON *obj, const char *key)
 {
     cJSON *item = cJSON_GetObjectItem(obj, key);
-    return cJSON_IsString(item) ? item->valuestring : "?";
+    return cJSON_IsString(item) ? item->valuestring : "";
+}
+
+// Turns "79.94" into 7994 without using floating point.
+static int64_t amount_to_cents(const char *s)
+{
+    bool negative = false;
+    int64_t whole = 0, frac = 0;
+    int frac_digits = 0;
+
+    if (*s == '-') {
+        negative = true;
+        s++;
+    }
+    while (*s >= '0' && *s <= '9') {
+        whole = whole * 10 + (*s++ - '0');
+    }
+    if (*s == '.') {
+        s++;
+        while (*s >= '0' && *s <= '9' && frac_digits < 2) {
+            frac = frac * 10 + (*s++ - '0');
+            frac_digits++;
+        }
+    }
+    if (frac_digits == 1) {
+        frac *= 10;  // "45.2" means 45.20
+    }
+    int64_t cents = whole * 100 + frac;
+    return negative ? -cents : cents;
 }
 
 esp_err_t shopify_get_token(char *token_out, size_t token_len, int *expires_in)
@@ -99,7 +127,7 @@ esp_err_t shopify_get_token(char *token_out, size_t token_len, int *expires_in)
              "grant_type=client_credentials&client_id=%s&client_secret=%s",
              SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET);
 
-    ESP_LOGI(TAG, "Requesting access token from %s.myshopify.com ...", SHOPIFY_SHOP);
+    ESP_LOGI(TAG, "Requesting access token ...");
     resp_t resp;
     int status = 0;
     esp_err_t err = https_post(url, "application/x-www-form-urlencoded", NULL, body, &status, &resp);
@@ -129,28 +157,37 @@ esp_err_t shopify_get_token(char *token_out, size_t token_len, int *expires_in)
     return ESP_OK;
 }
 
-esp_err_t shopify_print_recent_orders(const char *token)
+esp_err_t shopify_fetch_today(const char *token, const char *since_utc,
+                              const char *last_seen, shopify_today_t *out)
 {
+    memset(out, 0, sizeof(*out));
+    strlcpy(out->currency, "CAD", sizeof(out->currency));
+
     char url[128];
     snprintf(url, sizeof(url), "https://%s.myshopify.com/admin/api/" API_VERSION "/graphql.json",
              SHOPIFY_SHOP);
 
-    // Ask only for the fields we display, to keep the response small.
+    // Newest first, only today's orders, only the fields we use.
+    // The date filter is passed as a GraphQL variable ($q) so it needs no escaping.
     const char *query =
-        "{ orders(first: 5, sortKey: CREATED_AT, reverse: true) { edges { node {"
-        " name createdAt displayFinancialStatus"
-        " totalPriceSet { shopMoney { amount currencyCode } } } } } }";
+        "query($q: String) { orders(first: 50, sortKey: CREATED_AT, reverse: true, query: $q) {"
+        " pageInfo { hasNextPage }"
+        " nodes { name createdAt cancelledAt displayFulfillmentStatus subtotalLineItemsQuantity"
+        " totalPriceSet { shopMoney { amount currencyCode } } } } }";
 
-    // Build {"query": "..."} with cJSON so quotes are escaped correctly.
+    char filter[64];
+    snprintf(filter, sizeof(filter), "created_at:>=%s", since_utc);
+
     cJSON *req = cJSON_CreateObject();
     cJSON_AddStringToObject(req, "query", query);
+    cJSON *vars = cJSON_AddObjectToObject(req, "variables");
+    cJSON_AddStringToObject(vars, "q", filter);
     char *body = cJSON_PrintUnformatted(req);
     cJSON_Delete(req);
     if (!body) {
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Fetching recent orders ...");
     resp_t resp;
     int status = 0;
     esp_err_t err = https_post(url, "application/json", token, body, &status, &resp);
@@ -158,9 +195,12 @@ esp_err_t shopify_print_recent_orders(const char *token)
     if (err != ESP_OK) {
         return err;
     }
-    ESP_LOGI(TAG, "HTTP %d, response size: %u bytes", status, (unsigned)resp.len);
+    if (status == 401) {
+        ESP_LOGW(TAG, "Access token rejected (HTTP 401)");
+        return SHOPIFY_ERR_AUTH;
+    }
     if (status != 200) {
-        ESP_LOGE(TAG, "Orders request failed: %.200s", resp.buf);
+        ESP_LOGE(TAG, "Orders request failed, HTTP %d: %.200s", status, resp.buf);
         return ESP_FAIL;
     }
 
@@ -171,6 +211,7 @@ esp_err_t shopify_print_recent_orders(const char *token)
     }
     cJSON *errors = cJSON_GetObjectItem(root, "errors");
     if (errors) {
+        // Includes rate limiting ("THROTTLED"); the main loop will back off and retry.
         char *e = cJSON_PrintUnformatted(errors);
         ESP_LOGE(TAG, "GraphQL errors: %.300s", e ? e : "?");
         cJSON_free(e);
@@ -178,17 +219,43 @@ esp_err_t shopify_print_recent_orders(const char *token)
         return ESP_FAIL;
     }
 
-    cJSON *data = cJSON_GetObjectItem(root, "data");
-    cJSON *orders = cJSON_GetObjectItem(data, "orders");
-    cJSON *edges = cJSON_GetObjectItem(orders, "edges");
-    cJSON *edge;
-    cJSON_ArrayForEach(edge, edges) {
-        cJSON *node = cJSON_GetObjectItem(edge, "node");
-        cJSON *money = cJSON_GetObjectItem(cJSON_GetObjectItem(node, "totalPriceSet"), "shopMoney");
-        printf("  %-7s  %s  %s %s  %s\n",
-               json_str(node, "name"), json_str(node, "createdAt"),
-               json_str(money, "amount"), json_str(money, "currencyCode"),
-               json_str(node, "displayFinancialStatus"));
+    cJSON *orders = cJSON_GetObjectItem(cJSON_GetObjectItem(root, "data"), "orders");
+    cJSON *page = cJSON_GetObjectItem(orders, "pageInfo");
+    out->truncated = cJSON_IsTrue(cJSON_GetObjectItem(page, "hasNextPage"));
+
+    cJSON *order;
+    cJSON_ArrayForEach(order, cJSON_GetObjectItem(orders, "nodes")) {
+        if (cJSON_IsString(cJSON_GetObjectItem(order, "cancelledAt"))) {
+            continue;  // skip cancelled orders
+        }
+
+        const char *created = json_str(order, "createdAt");
+        cJSON *money = cJSON_GetObjectItem(cJSON_GetObjectItem(order, "totalPriceSet"), "shopMoney");
+
+        if (out->orders == 0) {
+            // Results are newest first, so the first one is the newest.
+            strlcpy(out->newest_name, json_str(order, "name"), sizeof(out->newest_name));
+            strlcpy(out->newest_created, created, sizeof(out->newest_created));
+            const char *cur = json_str(money, "currencyCode");
+            if (cur[0]) {
+                strlcpy(out->currency, cur, sizeof(out->currency));
+            }
+        }
+
+        out->orders++;
+        out->revenue_cents += amount_to_cents(json_str(money, "amount"));
+
+        cJSON *qty = cJSON_GetObjectItem(order, "subtotalLineItemsQuantity");
+        if (cJSON_IsNumber(qty)) {
+            out->units += qty->valueint;
+        }
+        if (strcmp(json_str(order, "displayFulfillmentStatus"), "FULFILLED") == 0) {
+            out->shipped++;
+        }
+        // ISO timestamps in the same format sort correctly as plain strings.
+        if (last_seen[0] && strcmp(created, last_seen) > 0) {
+            out->new_orders++;
+        }
     }
 
     cJSON_Delete(root);
