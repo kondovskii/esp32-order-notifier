@@ -121,7 +121,7 @@ static void draw_footer(void)
 static void page_overview(const shopify_today_t *t)
 {
     char buf[48];
-    draw_header("TODAY");
+    draw_header("TODAY v2");
 
     format_money(t->revenue_cents, buf, sizeof(buf));
     draw_big_centered(13, buf, 2);
