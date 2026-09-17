@@ -12,7 +12,8 @@
 #include "cJSON.h"
 
 // The "latest" URL always points at the newest published release.
-#define MANIFEST_URL "https://github.com/kondovskii/esp32-order-notifier/releases/latest/download/manifest.json"
+// raw.githubusercontent.com serves files directly, with no redirect.
+#define MANIFEST_URL "https://raw.githubusercontent.com/kondovskii/esp32-order-notifier/main/manifest.json"
 #define MANIFEST_MAX 1024
 
 static const char *TAG = "ota";
@@ -42,7 +43,7 @@ static esp_err_t fetch_manifest(char *version, size_t version_len, char *url, si
         .event_handler = manifest_event,
         .crt_bundle_attach = esp_crt_bundle_attach,  // verify GitHub's certificate
         .timeout_ms = 15000,
-        .buffer_size = 2048,
+        .buffer_size = 8192,   // GitHub's redirect Location header is very long
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
@@ -99,7 +100,10 @@ esp_err_t ota_check_and_apply(ota_progress_cb_t cb)
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 20000,
         .keep_alive_enable = true,
+        .buffer_size = 8192,      // same long redirect applies to the firmware download
+        .buffer_size_tx = 2048,
     };
+
     esp_https_ota_config_t ota_cfg = {.http_config = &http_cfg};
 
     esp_https_ota_handle_t handle = NULL;
