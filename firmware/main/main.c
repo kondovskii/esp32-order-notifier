@@ -10,6 +10,7 @@
 #include "time_sync.h"
 #include "shopify.h"
 #include "oled.h"
+#include "audio.h"
 
 #define POLL_INTERVAL_S        60     // normal time between checks
 #define BACKOFF_START_S        10     // first retry delay after a failure
@@ -136,7 +137,7 @@ static esp_err_t poll_once(void)
     }
 
     if (s_today.new_orders > 0) {
-        // The chime and lights will hook in here.
+        audio_chime();  // lights will hook in here too
         ESP_LOGW(TAG, "*** %d NEW ORDER%s! Latest: %s ***",
                  s_today.new_orders, s_today.new_orders > 1 ? "S" : "", s_today.newest_name);
     }
@@ -200,6 +201,13 @@ void app_main(void)
     s_oled_ok = (oled_init() == ESP_OK);
     if (!s_oled_ok) {
         ESP_LOGE(TAG, "OLED init failed, continuing without display");
+    }
+
+    // Same idea for audio: no speaker is annoying, not fatal.
+    if (audio_init() == ESP_OK) {
+        audio_chime();  // boot test so you know the speaker works
+    } else {
+        ESP_LOGE(TAG, "Audio init failed, continuing without sound");
     }
 
     xTaskCreate(notifier_task, "notifier", 8192, NULL, 5, NULL);
