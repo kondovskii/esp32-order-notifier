@@ -1,6 +1,6 @@
 #include <string.h>
 #include "wifi.h"
-#include "secrets.h"
+#include "creds.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "esp_wifi.h"
@@ -63,8 +63,9 @@ esp_err_t wifi_init_and_connect(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL));
 
     wifi_config_t wifi_cfg = {0};
-    strlcpy((char *)wifi_cfg.sta.ssid, WIFI_SSID, sizeof(wifi_cfg.sta.ssid));
-    strlcpy((char *)wifi_cfg.sta.password, WIFI_PASS, sizeof(wifi_cfg.sta.password));
+    const creds_t *creds = creds_get();
+    strlcpy((char *)wifi_cfg.sta.ssid, creds->wifi_ssid, sizeof(wifi_cfg.sta.ssid));
+    strlcpy((char *)wifi_cfg.sta.password, creds->wifi_pass, sizeof(wifi_cfg.sta.password));
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -72,7 +73,7 @@ esp_err_t wifi_init_and_connect(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
     // Log the network name only, never the password.
-    ESP_LOGI(TAG, "Connecting to %s ...", WIFI_SSID);
+    ESP_LOGI(TAG, "Connecting to %s ...", creds->wifi_ssid);
     return wait_for_result(portMAX_DELAY);
 }
 
@@ -86,7 +87,7 @@ esp_err_t wifi_reconnect(int timeout_ms)
     if (wifi_is_connected()) {
         return ESP_OK;
     }
-    ESP_LOGI(TAG, "Reconnecting to %s ...", WIFI_SSID);
+    ESP_LOGI(TAG, "Reconnecting to %s ...", creds_get()->wifi_ssid);
     s_retries = 0;
     xEventGroupClearBits(s_events, WIFI_FAIL_BIT);
     esp_wifi_connect();

@@ -16,6 +16,7 @@
 #include "audio.h"
 #include "leds.h"
 #include "button.h"
+#include "creds.h"
 
 #define POLL_INTERVAL_S        60     // normal time between checks
 #define BACKOFF_START_S        10     // first retry delay after a failure
@@ -380,13 +381,12 @@ static void notifier_task(void *arg)
 
 void app_main(void)
 {
-    // Wi-Fi stores calibration data in NVS, so NVS must be initialized first.
+    // NVS holds the credentials (and Wi-Fi calibration data).
+    // Deliberately NOT erased on failure: erasing would wipe the provisioned credentials.
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed (%s). Re-flash the credentials image.", esp_err_to_name(err));
     }
-    ESP_ERROR_CHECK(err);
 
     s_ui_mutex = xSemaphoreCreateMutex();
 
@@ -408,6 +408,13 @@ void app_main(void)
 
     if (button_init(on_button_press) != ESP_OK) {
         ESP_LOGE(TAG, "Button init failed, continuing without it");
+    }
+
+    if (err != ESP_OK || creds_load() != ESP_OK) {
+        // Without credentials there's nothing to do: say so on the screen and stop.
+        ui_set_status("not provisioned");
+        leds_set_state(LEDS_OFFLINE);
+        return;
     }
 
     xTaskCreate(notifier_task, "notifier", 8192, NULL, 5, NULL);

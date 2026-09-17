@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include "shopify.h"
-#include "secrets.h"
+#include "creds.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
@@ -119,13 +119,14 @@ static int64_t amount_to_cents(const char *s)
 
 esp_err_t shopify_get_token(char *token_out, size_t token_len, int *expires_in)
 {
+    const creds_t *creds = creds_get();
     char url[128];
-    snprintf(url, sizeof(url), "https://%s.myshopify.com/admin/oauth/access_token", SHOPIFY_SHOP);
+    snprintf(url, sizeof(url), "https://%s.myshopify.com/admin/oauth/access_token", creds->shop);
 
     char body[256];
     snprintf(body, sizeof(body),
              "grant_type=client_credentials&client_id=%s&client_secret=%s",
-             SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET);
+             creds->client_id, creds->client_secret);
 
     ESP_LOGI(TAG, "Requesting access token ...");
     resp_t resp;
@@ -165,7 +166,7 @@ esp_err_t shopify_fetch_today(const char *token, const char *since_utc,
 
     char url[128];
     snprintf(url, sizeof(url), "https://%s.myshopify.com/admin/api/" API_VERSION "/graphql.json",
-             SHOPIFY_SHOP);
+             creds_get()->shop);
 
     // Newest first, only today's orders, only the fields we use.
     // The date filter is passed as a GraphQL variable ($q) so it needs no escaping.
