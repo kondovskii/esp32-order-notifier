@@ -17,12 +17,14 @@
 #include "leds.h"
 #include "button.h"
 #include "creds.h"
+#include "ota.h"
 
 #define POLL_INTERVAL_S        60     // normal time between checks
 #define BACKOFF_START_S        10     // first retry delay after a failure
 #define BACKOFF_MAX_S          600    // never wait longer than 10 minutes
 #define TOKEN_REFRESH_MARGIN_S 3600   // refresh the token 1 hour before it expires
 #define PAGE_TIMEOUT_S         30     // return to the overview after this long without a press
+#define SELFTEST_MAX_FAILS     3      // failed polls after an update before rolling back
 
 typedef enum {
     PAGE_OVERVIEW,
@@ -53,6 +55,9 @@ static bool s_unread = false;              // a new order hasn't been acknowledg
 static page_t s_page = PAGE_OVERVIEW;
 static int64_t s_last_press_us = 0;
 static char s_status[32] = "starting...";
+static bool s_ota_busy = false;
+static bool s_pending_verify = false;   // running brand-new firmware that must prove itself
+static int s_selftest_fails = 0;
 
 // ---------- Drawing helpers (call with the mutex held) ----------
 
@@ -234,6 +239,50 @@ static void ui_set_status(const char *msg)
     ui_refresh();
 }
 
+// Drawn directly during an update, without touching the page state.
+static void ui_ota(int percent, const char *msg)
+{
+    if (!s_oled_ok) {
+        return;
+    }
+    xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
+    oled_clear();
+    oled_text_centered(3, "UPDATING", 1, true);
+    oled_hline(0, 13, OLED_WIDTH);
+    oled_text_centered(19, msg, 1, true);
+    if (percent >= 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", percent);
+        oled_text_centered(30, buf, 2, true);
+        // Progress bar: hollow outline with a solid fill inside.
+        oled_fill_rect(0, 50, OLED_WIDTH, 8, true);
+        oled_fill_rect(1, 51, OLED_WIDTH - 2, 6, false);
+        oled_fill_rect(1, 51, (OLED_WIDTH - 2) * percent / 100, 6, true);
+    }
+    oled_flush();
+    xSemaphoreGive(s_ui_mutex);
+}
+
+// OTA runs in its own task: it needs a big stack for TLS and takes a while.
+static void ota_task(void *arg)
+{
+    esp_err_t err = ota_check_and_apply(ui_ota);  // reboots itself on success
+
+    if (err == ESP_ERR_NOT_FOUND) {
+        ui_ota(-1, "up to date");
+    } else {
+        ESP_LOGE(TAG, "Update failed: %s", esp_err_to_name(err));
+        ui_ota(-1, "update failed");
+    }
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
+    s_ota_busy = false;
+    xSemaphoreGive(s_ui_mutex);
+    ui_refresh();
+    vTaskDelete(NULL);
+}
+
 // ---------- Button ----------
 
 static void on_button_press(void)
@@ -250,6 +299,18 @@ static void on_button_press(void)
 
     button_set_ring(ring);
     ui_refresh();
+}
+
+static void on_button_long_press(void)
+{
+    xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
+    bool already = s_ota_busy;
+    s_ota_busy = true;
+    xSemaphoreGive(s_ui_mutex);
+    if (already) {
+        return;
+    }
+    xTaskCreate(ota_task, "ota", 8192, NULL, 5, NULL);
 }
 
 // ---------- Polling ----------
@@ -354,6 +415,12 @@ static void notifier_task(void *arg)
     for (;;) {
         int wait_s;
         if (poll_once() == ESP_OK) {
+            // A successful poll means Wi-Fi, TLS and Shopify all work, which is
+            // exactly the self-test a freshly installed firmware has to pass.
+            if (s_pending_verify) {
+                ota_mark_valid();
+                s_pending_verify = false;
+            }
             leds_set_state(LEDS_OK);
             ui_refresh();
             backoff_s = BACKOFF_START_S;
@@ -361,6 +428,10 @@ static void notifier_task(void *arg)
         } else {
             wait_s = backoff_s;
             ESP_LOGW(TAG, "Poll failed, retrying in %d s", wait_s);
+
+            if (s_pending_verify && ++s_selftest_fails >= SELFTEST_MAX_FAILS) {
+                ota_rollback_now();  // reboots into the previous firmware
+            }
 
             xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
             s_online = false;
@@ -406,7 +477,12 @@ void app_main(void)
         ESP_LOGE(TAG, "LED init failed, continuing without lights");
     }
 
-    if (button_init(on_button_press) != ESP_OK) {
+    s_pending_verify = ota_is_pending_verify();
+    if (s_pending_verify) {
+        ESP_LOGW(TAG, "Running new firmware on trial: it must fetch orders once to be kept");
+    }
+
+    if (button_init(on_button_press, on_button_long_press) != ESP_OK) {
         ESP_LOGE(TAG, "Button init failed, continuing without it");
     }
 
