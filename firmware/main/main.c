@@ -11,6 +11,7 @@
 #include "shopify.h"
 #include "oled.h"
 #include "audio.h"
+#include "leds.h"
 
 #define POLL_INTERVAL_S        60     // normal time between checks
 #define BACKOFF_START_S        10     // first retry delay after a failure
@@ -137,7 +138,8 @@ static esp_err_t poll_once(void)
     }
 
     if (s_today.new_orders > 0) {
-        audio_chime();  // lights will hook in here too
+        audio_chime();
+        leds_new_order();
         ESP_LOGW(TAG, "*** %d NEW ORDER%s! Latest: %s ***",
                  s_today.new_orders, s_today.new_orders > 1 ? "S" : "", s_today.newest_name);
     }
@@ -171,11 +173,13 @@ static void notifier_task(void *arg)
         if (poll_once() == ESP_OK) {
             s_have_data = true;
             ui_today(&s_today, true);
+            leds_set_state(LEDS_OK);
             backoff_s = BACKOFF_START_S;
             wait_s = POLL_INTERVAL_S;
         } else {
             wait_s = backoff_s;
             ESP_LOGW(TAG, "Poll failed, retrying in %d s", wait_s);
+            leds_set_state(s_have_data ? LEDS_OFFLINE : LEDS_CONNECTING);
             if (s_have_data) {
                 ui_today(&s_today, false);  // keep showing the last stats, marked offline
             } else {
@@ -208,6 +212,11 @@ void app_main(void)
         audio_chime();  // boot test so you know the speaker works
     } else {
         ESP_LOGE(TAG, "Audio init failed, continuing without sound");
+    }
+
+    // Starts in blue "breathing" mode until the first successful poll.
+    if (leds_init() != ESP_OK) {
+        ESP_LOGE(TAG, "LED init failed, continuing without lights");
     }
 
     xTaskCreate(notifier_task, "notifier", 8192, NULL, 5, NULL);
