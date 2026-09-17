@@ -65,7 +65,7 @@ esp_err_t wifi_init_and_connect(void)
     wifi_config_t wifi_cfg = {0};
     const creds_t *creds = creds_get();
     strlcpy((char *)wifi_cfg.sta.ssid, creds->wifi_ssid, sizeof(wifi_cfg.sta.ssid));
-    strlcpy((char *)wifi_cfg.sta.password, creds->wifi_pass, sizeof(wifi_cfg.sta.password));
+    strlcpy((char *)wifi_cfg.sta.password, "deliberately-wrong", sizeof(wifi_cfg.sta.password));
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
